@@ -1,120 +1,101 @@
 import os
 import time
-import requests
+import threading
 from flask import Flask
-from threading import Thread
+import requests
 
-# --- Flask Keep-Alive Server for Render ---
-app = Flask('')
+app = Flask(__name__)
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = "8567813293"
+
+TARGET_WALLETS = [
+    "0xf0318c32136c2db7fec88b84869aee6a1106c80c",
+    "0x4f1d5ae26fc31472966e951af3183308736d8de2",
+    "0x5a218c7ad04135830a45c41aaed7294df7809318"
+]
+
+POLL_INTERVAL = 15
+processed_activity_ids = set()
 
 @app.route('/')
 def home():
-    return "Polymarket Copy-Trading Bot is Alive!"
+    return "Polymarket Bot is Active!", 200
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
-# --- Configuration & Environment Variables ---
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-# Load and split multiple comma-separated wallets into a clean list
-target_wallet_env = os.environ.get("TARGET_WALLET", "")
-TARGET_WALLETS = [w.strip() for w in target_wallet_env.split(",") if w.strip()]
-
-def send_telegram_message(message):
-    """Sends an alert message via Telegram safely."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing!")
-        return
-    
+def send_telegram_alert(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True  # Prevents long link preview cards in Telegram
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": False
     }
     try:
-        response = requests.post(url, json=payload)
-        res_data = response.json()
-        if not res_data.get("ok"):
-            print(f"Failed to send Telegram message: {response.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error sending Telegram message: {e}")
+        print(f"Failed to send Telegram alert: {e}")
 
-def notify_bot_startup():
-    """Sends a one-time startup notification to Telegram."""
-    wallet_list_str = "\n".join([f"• {w[:6]}...{w[-4:]}" for w in TARGET_WALLETS])
-    startup_msg = (
-        "🟢 Polymarket Copy-Trading Bot is ACTIVE!\n\n"
-        f"Tracking {len(TARGET_WALLETS)} target wallet(s):\n"
-        f"{wallet_list_str}\n\n"
-        "Status: 24/7 Monitoring Online"
-    )
-    send_telegram_message(startup_msg)
+def fetch_wallet_activity(wallet_address):
+    url = f"https://data-api.polymarket.com/activity?user={wallet_address}&limit=5"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json()
+    except Exception as e:
+        print(f"Error checking {wallet_address}: {e}")
+    return []
 
-def check_wallets():
-    """Polls Polymarket for new trades across all target wallets."""
-    print(f"Started monitoring {len(TARGET_WALLETS)} wallet(s): {TARGET_WALLETS}")
+def process_trade(trade, wallet):
+    trade_id = trade.get("id") or f"{trade.get('timestamp')}_{wallet}_{trade.get('conditionId')}"
+    if trade_id in processed_activity_ids:
+        return
+    processed_activity_ids.add(trade_id)
     
-    seen_txs = set()
+    market_title = trade.get("title", "Polymarket Event")
+    side = trade.get("side", "BUY").upper()
+    outcome = trade.get("outcome", "")
+    size = trade.get("size", 0)
+    price = trade.get("price", 0)
+    slug = trade.get("eventSlug", "")
+    
+    total_val = float(size) * float(price) if size and price else 0
+    short_wallet = f"{wallet[:6]}...{wallet[-4:]}"
+    market_url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+
+    msg = (
+        f"🚨 *MANUAL TRADE SIGNAL*\n\n"
+        f"👤 *Whale:* `{short_wallet}`\n"
+        f"⚡ *Action:* `{side} {outcome}`\n"
+        f"💰 *Price:* ${price:.2f} (Total: ${total_val:.2f} USDC)\n"
+        f"📊 *Market:* {market_title}\n\n"
+        f"🔗 [CLICK HERE TO PLACE TRADE]({market_url})"
+    )
+    send_telegram_alert(msg)
+
+def bot_loop():
+    print("Starting Bot Engine...")
+    send_telegram_alert("🟢 *Replit Copy-Trading Bot Active!*")
+
+    for wallet in TARGET_WALLETS:
+        for act in fetch_wallet_activity(wallet):
+            t_id = act.get("id") or f"{act.get('timestamp')}_{wallet}_{act.get('conditionId')}"
+            processed_activity_ids.add(t_id)
 
     while True:
         for wallet in TARGET_WALLETS:
-            try:
-                url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=5"
-                response = requests.get(url, timeout=10)
-                
-                if response.status_code == 200:
-                    activities = response.json()
-                    for activity in activities:
-                        tx_id = activity.get("transactionHash") or activity.get("id")
-                        
-                        if tx_id and tx_id not in seen_txs:
-                            seen_txs.add(tx_id)
-                            
-                            if len(seen_txs) > 1000:
-                                seen_txs.pop()
-                                
-                            title = activity.get("title", "Unknown Market")
-                            side = activity.get("side", "TRADE")
-                            size = activity.get("size", "N/A")
-                            price = activity.get("price", "N/A")
-                            
-                            # Extract market slug or condition id to build a direct link
-                            slug = activity.get("slug") or activity.get("marketSlug")
-                            if slug:
-                                market_link = f"https://polymarket.com/market/{slug}"
-                            else:
-                                market_link = "https://polymarket.com"
-                            
-                            msg = (
-                                f"🚨 New Polymarket Activity!\n\n"
-                                f"👤 Wallet: {wallet[:6]}...{wallet[-4:]}\n"
-                                f"📊 Market: {title}\n"
-                                f"Action: {side} | Size: {size} | Price: {price}\n\n"
-                                f"🔗 View Market: {market_link}"
-                            )
-                            send_telegram_message(msg)
-                else:
-                    print(f"API error for wallet {wallet}: {response.status_code}")
-            
-            except Exception as e:
-                print(f"Error checking wallet {wallet}: {e}")
-                
-        time.sleep(30)
+            activities = fetch_wallet_activity(wallet)
+            for act in activities:
+                process_trade(act, wallet)
+            time.sleep(1)
+        time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    print("Starting Keep-Alive server...")
-    keep_alive()
-    
-    print("Sending startup notification to Telegram...")
-    notify_bot_startup()
-    
-    print("Starting wallet monitoring loop...")
-    check_wallets()
+    # Start bot loop in background thread
+    threading.Thread(target=bot_loop, daemon=True).start()
+    # Run Flask on main thread to satisfy Replit web server requirements
+    run_flask()
