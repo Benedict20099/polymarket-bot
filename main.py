@@ -28,7 +28,7 @@ target_wallet_env = os.environ.get("TARGET_WALLET", "")
 TARGET_WALLETS = [w.strip() for w in target_wallet_env.split(",") if w.strip()]
 
 def send_telegram_message(message):
-    """Sends an alert message via Telegram safely without markdown parsing issues."""
+    """Sends an alert message via Telegram safely."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram credentials missing!")
         return
@@ -36,7 +36,8 @@ def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+        "text": message,
+        "disable_web_page_preview": True  # Prevents long link preview cards in Telegram
     }
     try:
         response = requests.post(url, json=payload)
@@ -45,6 +46,17 @@ def send_telegram_message(message):
             print(f"Failed to send Telegram message: {response.text}")
     except Exception as e:
         print(f"Error sending Telegram message: {e}")
+
+def notify_bot_startup():
+    """Sends a one-time startup notification to Telegram."""
+    wallet_list_str = "\n".join([f"• {w[:6]}...{w[-4:]}" for w in TARGET_WALLETS])
+    startup_msg = (
+        "🟢 Polymarket Copy-Trading Bot is ACTIVE!\n\n"
+        f"Tracking {len(TARGET_WALLETS)} target wallet(s):\n"
+        f"{wallet_list_str}\n\n"
+        "Status: 24/7 Monitoring Online"
+    )
+    send_telegram_message(startup_msg)
 
 def check_wallets():
     """Polls Polymarket for new trades across all target wallets."""
@@ -74,11 +86,19 @@ def check_wallets():
                             size = activity.get("size", "N/A")
                             price = activity.get("price", "N/A")
                             
+                            # Extract market slug or condition id to build a direct link
+                            slug = activity.get("slug") or activity.get("marketSlug")
+                            if slug:
+                                market_link = f"https://polymarket.com/market/{slug}"
+                            else:
+                                market_link = "https://polymarket.com"
+                            
                             msg = (
                                 f"🚨 New Polymarket Activity!\n\n"
                                 f"👤 Wallet: {wallet[:6]}...{wallet[-4:]}\n"
                                 f"📊 Market: {title}\n"
-                                f"Action: {side} | Size: {size} | Price: {price}"
+                                f"Action: {side} | Size: {size} | Price: {price}\n\n"
+                                f"🔗 View Market: {market_link}"
                             )
                             send_telegram_message(msg)
                 else:
@@ -93,6 +113,8 @@ if __name__ == "__main__":
     print("Starting Keep-Alive server...")
     keep_alive()
     
+    print("Sending startup notification to Telegram...")
+    notify_bot_startup()
+    
     print("Starting wallet monitoring loop...")
     check_wallets()
-
