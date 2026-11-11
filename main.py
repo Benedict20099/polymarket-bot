@@ -95,4 +95,3 @@ if __name__ == "__main__":
     
     print("Starting wallet monitoring loop...")
     check_wallets()
-  
